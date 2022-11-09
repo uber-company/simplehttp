@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/http"
@@ -14,7 +13,10 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/uber-company/gonmap/simplenet"
 )
 
 const (
@@ -42,26 +44,45 @@ func (r *Raw) String() string {
 	return r.Header + "\r\n" + r.Body
 }
 
-var DefaultTransport http.RoundTripper = &http.Transport{
-	Proxy: http.ProxyFromEnvironment,
-	DialContext: (&net.Dialer{
-		Timeout:   15 * time.Second,
-		KeepAlive: 15 * time.Second,
-	}).DialContext,
-	IdleConnTimeout:       10 * time.Second,
-	TLSHandshakeTimeout:   5 * time.Second,
-	ExpectContinueTimeout: 1 * time.Second,
-	TLSClientConfig: &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS10,
-	},
-	DisableKeepAlives: true,
-}
-
 func NewClient() *http.Client {
+	var transport = &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   15 * time.Second,
+			KeepAlive: 15 * time.Second,
+
+			LocalAddr: &net.TCPAddr{
+				IP:   net.IPv4(0, 0, 0, 0),
+				Port: simplenet.GetAvilableport(),
+			},
+			Deadline: time.Now().Add(15 * time.Second),
+			Control: func(network, address string, c syscall.RawConn) error {
+				return c.Control(func(fd uintptr) {
+					// 在这里可以调用 syscalls 设置套接字属性，例如:
+					if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+
+					}
+					linger := syscall.Linger{
+						Onoff:  1, // 启用 SO_LINGER
+						Linger: 0, // 立即关闭，不等待未发送的数据
+					}
+					if err := syscall.SetsockoptLinger(int(fd), syscall.SOL_SOCKET, syscall.SO_LINGER, &linger); err != nil {
+					}
+				})
+			},
+		}).DialContext,
+		IdleConnTimeout:       10 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS10,
+		},
+		DisableKeepAlives: true,
+	}
 	client := http.DefaultClient
 	client.Timeout = 5 * time.Second
-	client.Transport = DefaultTransport
+	client.Transport = transport
 	return client
 }
 
@@ -138,7 +159,6 @@ func NewResponse(response *http.Response) *Response {
 }
 
 func RandomUserAgent() string {
-	rand.Seed(time.Now().UnixNano())
 	i := rand.Intn(len(userAgents))
 	return userAgents[i] + " Time/" + strconv.FormatInt(time.Now().UnixMilli(), 10)
 }
@@ -185,7 +205,7 @@ func ReadBodyTimeout(reader io.Reader, duration time.Duration) (buf []byte, err 
 				}
 			}
 		}()
-		Buf, err = ioutil.ReadAll(reader)
+		Buf, err = io.ReadAll(reader)
 		BufChan <- Buf
 	}()
 
